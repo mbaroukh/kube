@@ -1,0 +1,148 @@
+- name: installation des parties communes
+  hosts: all
+  user: k8s
+  become: yes
+  tasks:
+    ## Désactiver ipv6 histoire de simplifier
+    - name: Disable IPv6 with sysctl
+      ansible.posix.sysctl:
+        name: "{{ item }}"
+        value: "1"
+        state: "present"
+        reload: "yes"
+      with_items:
+        - net.ipv6.conf.all.disable_ipv6
+        - net.ipv6.conf.default.disable_ipv6
+        - net.ipv6.conf.lo.disable_ipv6
+
+    - name: blacklist ipv6 in modprobe
+      ansible.builtin.lineinfile:
+        dest: /etc/modprobe.d/ipv6.conf
+        line: "blacklist ipv6"
+        mode: "0644"
+        create: true
+
+    # Install package debian repo
+    - name: minimum packages
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - gpg
+          - curl
+          - jq
+          - rsync
+        state: present
+
+    - name: Add Kubernetes apt key.
+      apt_key:
+        url: https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key
+        state: present
+      register: add_repository_key
+
+    - name: Add Kubernetes repository.
+      ansible.builtin.apt_repository:
+        repo: "deb https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /"
+        state: present
+        filename: kubernetes.list
+        update_cache: true
+
+    - name: Add Kubernetes apt preferences file to pin a version.
+      copy:
+        dest: /etc/apt/preferences.d/kubernetes
+        content: |
+          Package: kubectl
+          Pin: version 1.28.*
+          Pin-Priority: 1000
+
+          Package: kubeadm
+          Pin: version 1.28.*
+          Pin-Priority: 1000
+
+          Package: kubelet
+          Pin: version 1.28.*
+          Pin-Priority: 1000
+        mode: 0644
+
+    - name: create modules-load.d
+      file:
+        path: /etc/modules-load.d
+        state: directory
+
+    - name: add required modules
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+        persistent: present
+      with_items:
+        - overlay
+        - br_netfilter
+
+    # Install and setup containerd
+    - name: containerd
+      apt:
+        name:
+          - containerd
+        state: present
+      register: containerd_config
+
+    - name: Containerd Full Config
+      shell: |
+        containerd config default > /etc/containerd/config.toml
+      when: containerd_config is changed
+
+    - name: "configure containerd to use systemd"
+      replace:
+        path: "/etc/containerd/config.toml"
+        regexp: "(SystemdCgroup = )false"
+        replace: '\1true'
+        backup: no
+      notify:
+        - Containerd Restart
+
+    - name: "update cri sandbox image version"
+      replace:
+        path: "/etc/containerd/config.toml"
+        regexp: "(registry.k8s.io/pause:3).[0-9]*"
+        replace: '\1.9'
+        backup: no
+      notify:
+        - Containerd Restart
+
+    - name: kube packages
+      apt:
+        name:
+          - kubectl
+          - kubeadm
+        state: present
+
+    - name: required system config
+      ansible.posix.sysctl:
+        name: "{{ item }}"
+        value: "1"
+        state: "present"
+        reload: "yes"
+      with_items:
+        - net.bridge.bridge-nf-call-iptables
+        - net.ipv4.ip_forward
+
+    - name: Disable SWAP since kubernetes can't work with swap enabled (1/2)
+      shell: |
+        swapoff -a
+    - name: Disable SWAP in fstab since kubernetes can't work with swap enabled (2/2)
+      replace:
+        path: /etc/fstab
+        regexp: '^([^#][^\s]+\snone\s+swap\s+sw.*)$'
+        replace: '# \1'
+
+    - name: preload kubeadm images
+      shell: |
+        kubeadm config images pull
+
+  handlers:
+    - name: Containerd Restart
+      systemd:
+        name: containerd.service
+        daemon_reload: yes
+        state: started
+        enabled: yes
