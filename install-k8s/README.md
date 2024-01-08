@@ -13,7 +13,6 @@ Donc là, l'objectif c'est de créer un cluster avec un `control-plan` et au moi
 Le minimum nécessaire, c'est :
 
 - Un gestionnaire de machines virtuelles. Ici je vais utiliser [VirtualBox](https://www.virtualbox.org/) mais libre à vous d'utiliser autre chose si vous êtes plus à l'aise avec (QEmu, VMWare, ...).
-- `kubectl`. Permettra de contrôler le cluster. Personnellement je l'ai installé via [asdf](https://asdf-vm.com/).
 - `ansible`. Sur mon poste j'ai juste installé la package `ansible` via apt.
 
 ### VM Source
@@ -47,9 +46,9 @@ Sinon, je ne vais pas tout détailler non plus mais en gros vous devez, sur la v
 
 1. Mettre votre clé publique dans `.ssh/authorized` du compte
    ```bash
-   $ mkdir .ssh
-   $ echo "ssh-ed25519 AAAAC3Nza...wnuSQuWw8c mike@..." >.ssh/authorized_keys
-   $ chmod -R go-rwX .ssh/
+   mkdir .ssh
+   echo "ssh-ed25519 AAAAC3Nza...wnuSQuWw8c mike@..." >.ssh/authorized_keys
+   chmod -R go-rwX .ssh/
    ```
 2. Installer `sudo`
    ````bash
@@ -140,14 +139,15 @@ sudo sed -i "s/k8s-src/k8s-controlplan/g" /etc/hosts
 
 Il y aura une erreur de sudo mais pas grave.
 
-Toutes les VMs auront les même clés de serveur ssh. Ce n'est pas idéal mais ça ira. Si vous voulez les regénérer :
+Toutes les VMs auront les même clés de serveur ssh. Ce n'est pas idéal mais dans le cas d'un cluster de dev, ça ira.  
+Si vous voulez les regénérer :
 
-```
+```bash
 rm /etc/ssh/ssh_host_*
 dpkg-reconfigure openssh-server
 ```
 
-Ensuite le mieux est de rebooter (pas nécessaire, mais histoire de).
+Ensuite le mieux est de rebooter.
 
 On va maintenant utiliser `kubeadm` pour configurer le cluster.
 kubeadm sera utilisé aussi bien pour configurer le control-plan que pour configurer les nodes.
@@ -155,16 +155,14 @@ kubeadm sera utilisé aussi bien pour configurer le control-plan que pour config
 Pour configurer le control-plan :
 
 ```bash
-sudo kubeadm init --pod-network-cidr 192.168.71.1/24
+sudo kubeadm init --pod-network-cidr 10.1.0.0/16  --service-cidr 10.2.0.0/16
 ```
 
-Le paramètre `pod-network-cidr` est fonction de votre réseau.  
-Il sert à indiquer à kubernetes sur quelle plage d'adresses il peut créer des services.  
-Ce sera utilisé par le le CNI (Container Network Interface) qu'on installera par la suite.
+Les paramètres `pod-network-cidr` et `service-cidr` sont fonction de votre réseau.  
+Ce qui est important, c'est qu'ils ne recoupent pas votre réseau local.  
+Chez moi, le réseau est en `192.168.68.76/22` donc va de `192.168.68.1` à `192.168.71.254` (vérfiable en utilisant, par exemple, [IP Calculator](https://jodies.de/ipcalc)). En prenant des ips en `10.x.x.x` je n'ai aucun risque de collision.
 
-Voilà comment j'ai fait pour déterminer sa valeur chez moi :  
-Ma machine sur le wifi a actuellement l'ip `192.168.68.76/22`. On pourrait calculer le détail du réseau,, mais il y a des outils en ligne donc autant les utiliser. En mettant l'ip sur [IP Calculator](https://jodies.de/ipcalc) on voit que ce reseau a 1022 ips allant de `192.168.68.1` a `192.168.71.254`. La plage `192.168.68.1/24` étant actuellement utilisée par mon dhcp, je vais dire que mon cluster sera sur `192.168.71.1/24` soit 254 adresses entre `192.168.71.1` et `192.168.71.254`.
-J'aurais un problème lorsque j'aurais ajouté environ 400 nouvelles machines sur mon réseau, mais on verra bien à ce moment 🙂.
+> **Note:** Ces ips ne seront accessibles que depuis les nodes. Elles ne seront pas du tout accessible depuis l'extérieur. Pour qu'un service soit accessible de l'extérieur il doit être de type `NodePort` ou de type `LoadBalancer`. Les services de type `ClusterIp` ne le sont pas.
 
 Finalement, si tout se passe bien avec `kubeadm` vous devriez avoir une sortie qui ressemble à ça :
 
@@ -202,7 +200,7 @@ sudo chown $(id -u):$(id -g) $HOME/.kube/config
 Après ça, vous devriez pouvoir lancer des commandes kubernetes :
 
 ```bash
-$ kubectl get node
+$ kubectl get nodes
 NAME              STATUS     ROLES           AGE     VERSION
 k8s-controlplan   NotReady   control-plane   3m21s   v1.28.5
 ```
@@ -222,8 +220,7 @@ L'installation est très simple puisque le CNI fonctionne lui même comme un `da
 Il suffit donc de télécharger le fichier de définition puis l'installer avec kubectl :
 
 ```bash
-curl https://raw.githubusercontent.com/projectcalico/calico/v3.26.4/manifests/calico.yaml -O
-kubectl apply -f calico.yaml
+kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.26.4/manifests/calico.yaml
 ```
 
 Au bout de quelques secondes, le cluster devrait passer en `Ready` :
@@ -248,18 +245,9 @@ Machine has been successfully cloned as "k8s-node1"
 $ VBoxManage startvm k8s-node1 --type headless
 Waiting for VM "k8s-node1" to power on...
 VM "k8s-node1" has been successfully started.
-
-$ echo "k8s-node1"|sudo tee /etc/hostname
-$ sudo sed -i "s/k8s-src/k8s-node1/g" /etc/hosts
-
-$ sudo su -
-sudo: unable to resolve host k8s-src: No address associated with hostname
-$ rm /etc/ssh/ssh_host_*
-$ dpkg-reconfigure openssh-server
-Creating SSH2 RSA key; this may take some time ...
-3072 SHA256:JdTJcnGJcSbtDFopu+pRAptnEazuCAsewzxZs1ofzfI root@k8s-src (RSA)
-...
-$ sudo reboot
+echo "k8s-node1"|sudo tee /etc/hostname
+sudo sed -i "s/k8s-src/k8s-node1/g" /etc/hosts
+sudo reboot
 ```
 
 Une fois le node redémarré, on peut utiliser la commande que nous a fournie la sortie de kubeadm sur le control-plan pour configurer le node :
@@ -286,4 +274,13 @@ k8s-controlplan   Ready    control-plane   24m   v1.28.5
 k8s-node1         Ready    <none>          18s   v1.28.5
 ```
 
-On peut répeter l'opération autant de fois que nécessaire pour ajouter des nodes.
+On peut répeter l'opération autant de fois que nécessaire pour ajouter des nodes, mais attention :  
+La commande permettant de joindre un node au cluster n'est **valable que 24h**.  
+Pour en ajouter un passé ce délai, il faut régénérer un token.  
+Le plus simple est d'utiliser cette commande sur le control-plan :
+
+```bash
+sudo kubeadm token create --print-join-command
+```
+
+qui va régénérer un token et afficher la commande à utiliser sur le nouveau node.
